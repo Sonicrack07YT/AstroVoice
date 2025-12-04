@@ -36,6 +36,14 @@
 
       <!-- Controles de llamada -->
       <div id="callControls" class="call-controls" style="display: none">
+        <!-- Selector de Micrófono -->
+        <div class="mic-selector-container">
+          <label for="micSelector">🎤 Select Microphone:</label>
+          <select id="micSelector" class="mic-selector">
+            <option value="">Loading microphones...</option>
+          </select>
+        </div>
+
         <div class="controls-row">
           <button id="exitBtn" class="control-btn exit">📞 Disconnect</button>
         </div>
