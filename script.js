@@ -1,4 +1,130 @@
 // =====================================================
+// CLASE: VOICE DETECTOR
+// =====================================================
+
+class VoiceDetector {
+  constructor(stream, onVoiceChange) {
+    this.stream = stream;
+    this.onVoiceChange = onVoiceChange;
+    this.audioContext = null;
+    this.analyser = null;
+    this.microphone = null;
+    this.dataArray = null;
+    this.isTalking = false;
+    this.detectionInterval = null;
+    
+    // Configuración de umbrales
+    this.threshold = -25;
+    this.silenceThreshold = -30;
+    this.silenceDelay = 500;
+    this.lastSpeakTime = 0;
+    
+    this.init();
+  }
+
+  async init() {
+    try {
+      this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      this.analyser = this.audioContext.createAnalyser();
+      this.analyser.fftSize = 2048;
+      this.analyser.smoothingTimeConstant = 0.8;
+      
+      this.microphone = this.audioContext.createMediaStreamSource(this.stream);
+      this.microphone.connect(this.analyser);
+      
+      this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
+      
+      this.startDetection();
+      console.log("✓ Voice detector initialized");
+    } catch (error) {
+      console.error("❌ Voice detector init error:", error);
+    }
+  }
+
+  getVolumeDb() {
+    this.analyser.getByteTimeDomainData(this.dataArray);
+
+    let sum = 0;
+    for (let i = 0; i < this.dataArray.length; i++) {
+      const v = this.dataArray[i] - 128; // centrar
+      sum += v * v;
+    }
+
+    const rms = Math.sqrt(sum / this.dataArray.length);
+    const db = 20 * Math.log10(rms / 128);
+
+    return db;
+  }
+
+  startDetection() {
+    this.detectionInterval = setInterval(() => {
+      const volumeDb = this.getVolumeDb();
+      const now = Date.now();
+      
+      if (volumeDb > this.threshold) {
+        this.lastSpeakTime = now;
+        
+        if (!this.isTalking) {
+          this.isTalking = true;
+          this.notifyChange(true, volumeDb);
+        }
+      } 
+      else if (volumeDb < this.silenceThreshold && this.isTalking) {
+        if (now - this.lastSpeakTime > this.silenceDelay) {
+          this.isTalking = false;
+          this.notifyChange(false, volumeDb);
+        }
+      }
+      this.notifyChange(this.isTalking, volumeDb);
+    });
+  }
+
+  notifyChange(isTalking, volumeDb) {
+    if (this.onVoiceChange) {
+      this.onVoiceChange(isTalking, volumeDb);
+    }
+  }
+
+  setSensitivity(level) {
+    switch (level) {
+      case 'low':              // hablar normal sin gritar
+        this.threshold = -40;  // habla desde voz baja
+        this.silenceThreshold = -48; // silencio real
+        break;
+
+      case 'medium':           // buena para la mayoría
+        this.threshold = -34;  // voz normal detectada rápido
+        this.silenceThreshold = -44;
+        break;
+
+      case 'high':             // si quieres detectar susurros
+        this.threshold = -30;  // casi cualquier voz activa
+        this.silenceThreshold = -42;
+        break;
+
+      default:
+        throw new Error(`Unknown sensitivity level: ${level}`);
+    }
+  }
+
+  dispose() {
+    if (this.detectionInterval) {
+      clearInterval(this.detectionInterval);
+    }
+    
+    if (this.microphone) {
+      this.microphone.disconnect();
+    }
+    
+    if (this.audioContext && this.audioContext.state !== 'closed') {
+      this.audioContext.close();
+    }
+    
+    console.log("✓ Voice detector disposed");
+  }
+}
+
+// =====================================================
 // CLASE: AudioEffectsManager
 // Maneja efectos de audio (reverb, cave, underwater, etc.)
 // =====================================================
@@ -487,6 +613,58 @@ class MicrophoneManager {
   isMicMuted() {
     return this.isMuted;
   }
+
+  // NUEVO: Cambiar el dispositivo de micrófono
+  async changeMicrophone(deviceId) {
+    console.log(`🎤 Changing microphone to: ${deviceId}`);
+    
+    // Detener el micrófono actual
+    this.stop();
+    
+    // Iniciar con el nuevo dispositivo
+    try {
+      // Modificar las constraints para usar el deviceId específico
+      const constraints = {
+        audio: {
+          deviceId: deviceId ? { exact: deviceId } : undefined,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      };
+      
+      this.mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+      const audioContext = Tone.context.rawContext || Tone.context._context;
+
+      this.mediaStreamSource = audioContext.createMediaStreamSource(
+        this.mediaStream
+      );
+      const inputNode = this.audioEffects.createInputNode(1.0);
+
+      const dest = audioContext.createMediaStreamDestination();
+      this.mediaStreamSource.connect(inputNode.input);
+      await this.audioEffects.applyEffect("none", null);
+      
+      console.log("✓ Microphone changed successfully");
+      return true;
+    } catch (error) {
+      console.error("❌ Error changing microphone:", error);
+      throw error;
+    }
+  }
+
+  // NUEVO: Obtener lista de dispositivos de audio disponibles
+  static async getAudioDevices() {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const audioInputs = devices.filter(device => device.kind === 'audioinput');
+      console.log(`🎤 Found ${audioInputs.length} audio input devices`);
+      return audioInputs;
+    } catch (error) {
+      console.error("❌ Error getting audio devices:", error);
+      return [];
+    }
+  }
 }
 
 // =====================================================
@@ -940,6 +1118,40 @@ class WebRTCManager {
   forEach(callback) {
     this.peerConnections.forEach(callback);
   }
+
+  // NUEVO: Actualizar el stream de micrófono en todas las conexiones activas
+  async updateMicrophoneStream(newStream) {
+    console.log("🔄 Updating microphone stream in all peer connections...");
+    
+    if (!newStream) {
+      console.error("❌ No new stream provided");
+      return;
+    }
+
+    const audioTrack = newStream.getAudioTracks()[0];
+    if (!audioTrack) {
+      console.error("❌ No audio track in new stream");
+      return;
+    }
+
+    // Actualizar el track en todas las conexiones activas
+    this.peerConnections.forEach((pc, gamertag) => {
+      const senders = pc.getSenders();
+      const audioSender = senders.find(sender => sender.track?.kind === 'audio');
+      
+      if (audioSender) {
+        audioSender.replaceTrack(audioTrack)
+          .then(() => {
+            console.log(`✓ Updated audio track for ${gamertag}`);
+          })
+          .catch((error) => {
+            console.error(`❌ Error updating track for ${gamertag}:`, error);
+          });
+      }
+    });
+
+    console.log("✓ Microphone stream updated in all connections");
+  }
 }
 
 // =====================================================
@@ -1238,6 +1450,8 @@ class UIManager {
       pttKeySelector: document.getElementById("pttKeySelector"),
       pttKeyInput: document.getElementById("pttKeyInput"),
       pttKeyDisplay: document.getElementById("pttKeyDisplay"),
+      // NUEVO: Selector de micrófono
+      micSelector: document.getElementById("micSelector"),
     };
 
     this.elements.minecraftConnectContainer.id = "minecraftConnectContainer";
@@ -1395,6 +1609,80 @@ class UIManager {
     return this.elements.roomUrlInput.value.trim();
   }
 
+
+  // NUEVO: Poblar el selector de micrófonos
+  async populateMicrophoneSelector() {
+    if (!this.elements.micSelector) {
+      console.error("❌ Mic selector element not found");
+      return;
+    }
+
+    try {
+      // IMPORTANTE: Solicitar permisos de micrófono primero si no los tenemos
+      // Esto asegura que enumerateDevices() devuelva los labels reales
+      try {
+        // Pedir un stream temporal solo para asegurar que tenemos permisos
+        const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        // Detenerlo inmediatamente, solo lo necesitábamos para los permisos
+        tempStream.getTracks().forEach(track => track.stop());
+        console.log("✓ Microphone permissions confirmed");
+      } catch (permError) {
+        console.warn("⚠️ Could not get temporary mic access:", permError);
+      }
+      
+      // Ahora sí, enumerar dispositivos - deberían tener labels
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const audioInputs = devices.filter(device => device.kind === 'audioinput');
+      
+      console.log(`🎤 Found ${audioInputs.length} audio input devices:`);
+      audioInputs.forEach((device, index) => {
+        console.log(`  [${index}] ${device.label || 'Unnamed'} (${device.deviceId.substring(0, 20)}...)`);
+      });
+      
+      this.elements.micSelector.innerHTML = '';
+
+      if (audioInputs.length === 0) {
+        this.elements.micSelector.innerHTML = '<option value="">No microphones found</option>';
+        this.elements.micSelector.disabled = true;
+        return;
+      }
+
+      // Agregar una opción para cada dispositivo
+      audioInputs.forEach((device, index) => {
+        const option = document.createElement('option');
+        option.value = device.deviceId;
+        
+        // Usar el label del dispositivo o un nombre genérico
+        let label = device.label || `Microphone ${index + 1}`;
+        
+        // Si el label es muy largo, truncarlo
+        if (label.length > 50) {
+          label = label.substring(0, 47) + '...';
+        }
+        
+        option.textContent = label;
+        
+        // Marcar como seleccionado el dispositivo "default" o el primero
+        if (device.deviceId === 'default' || index === 0) {
+          option.selected = true;
+        }
+        
+        this.elements.micSelector.appendChild(option);
+      });
+
+      this.elements.micSelector.disabled = false;
+      console.log(`✓ Loaded ${audioInputs.length} microphones into selector`);
+      
+      // Si solo hay un micrófono, mostrar mensaje informativo
+      if (audioInputs.length === 1) {
+        console.log(`ℹ️ Only one microphone detected. If you have multiple microphones, make sure they are connected and recognized by your system.`);
+      }
+    } catch (error) {
+      console.error("❌ Error populating microphone selector:", error);
+      this.elements.micSelector.innerHTML = '<option value="">Error loading microphones</option>';
+      this.elements.micSelector.disabled = true;
+    }
+  }
   isPCDevice() {
     return this.isPC;
   }
@@ -1411,6 +1699,7 @@ class VoiceChatApp {
     this.micManager = new MicrophoneManager(this.audioEffects);
     this.participantsManager = new ParticipantsManager();
     this.distanceCalculator = new DistanceCalculator(20);
+    this.voiceDetector = null;
     this.webrtc = new WebRTCManager(
       this.participantsManager,
       this.audioEffects,
@@ -1676,8 +1965,6 @@ class VoiceChatApp {
         await this.micManager.start(1.0);
       } catch (micError) {
         console.error("Microphone error:", micError);
-
-        // Mostrar mensaje más claro según el error
         let userMessage = "❌ Could not access microphone.\n\n";
 
         if (micError.message.includes("doesn't support")) {
@@ -1701,6 +1988,23 @@ class VoiceChatApp {
         return;
       }
 
+      // Inicializar Voice Detector
+      const micStream = this.micManager.getStream();
+      if (micStream) {
+        this.voiceDetector = new VoiceDetector(micStream, (isTalking, volumeDb) => {
+          if (this.ws && this.ws.readyState === 1) {
+            this.ws.send(JSON.stringify({
+              type: "voice-detection",
+              gamertag: this.currentGamertag,
+              isTalking: isTalking,
+              volume: volumeDb
+            }));
+          }
+        });
+        
+        this.voiceDetector.setSensitivity('high');
+      }
+
       this.webrtc.setGamertag(this.currentGamertag);
       this.minecraft.setGamertag(this.currentGamertag);
 
@@ -1718,7 +2022,7 @@ class VoiceChatApp {
     }
   }
 
-  onWebSocketOpen() {
+  async onWebSocketOpen() {
     this.ui.updateRoomInfo("✅ Connected to voice chat");
 
     this.ws.send(
@@ -1748,6 +2052,58 @@ class VoiceChatApp {
     this.participantsManager.add(this.currentGamertag, true);
     this.updateUI();
 
+
+    // NUEVO: Cargar lista de micrófonos disponibles
+    await this.ui.populateMicrophoneSelector();
+    
+    // NUEVO: Event listener para cambio de micrófono
+    if (this.ui.elements.micSelector) {
+      const micChangeHandler = async (e) => {
+        const deviceId = e.target.value;
+        if (!deviceId) return;
+        
+        try {
+          console.log(`🎤 User selected microphone: ${deviceId}`);
+          
+          // Cambiar el micrófono
+          await this.micManager.changeMicrophone(deviceId);
+          
+          // Reinicializar el voice detector con el nuevo stream
+          if (this.voiceDetector) {
+            this.voiceDetector.dispose();
+          }
+          
+          const micStream = this.micManager.getStream();
+          if (micStream) {
+            this.voiceDetector = new VoiceDetector(micStream, (isTalking, volumeDb) => {
+              if (this.ws && this.ws.readyState === 1) {
+                this.ws.send(JSON.stringify({
+                  type: "voice-detection",
+                  gamertag: this.currentGamertag,
+                  isTalking: isTalking,
+                  volume: volumeDb
+                }));
+              }
+            });
+            
+            this.voiceDetector.setSensitivity('high');
+          }
+          
+          // Reinicializar WebRTC con el nuevo micrófono
+          await this.webrtc.updateMicrophoneStream(micStream);
+          
+          console.log("✅ Microphone changed successfully");
+        } catch (error) {
+          console.error("❌ Error changing microphone:", error);
+          alert("Error changing microphone: " + error.message);
+        }
+      };
+      
+      // Remover listener anterior si existe
+      this.ui.elements.micSelector.removeEventListener('change', this.micChangeHandler);
+      this.micChangeHandler = micChangeHandler;
+      this.ui.elements.micSelector.addEventListener('change', this.micChangeHandler);
+    }
     this.heartbeatInterval = setInterval(() => {
       if (this.ws && this.ws.readyState === 1) {
         this.ws.send(
@@ -1942,6 +2298,11 @@ class VoiceChatApp {
     if (this.ws) {
       this.ws.close();
       this.ws = null;
+    }
+
+    if (this.voiceDetector) {
+      this.voiceDetector.dispose();
+      this.voiceDetector = null;
     }
 
     this.micManager.stop();
